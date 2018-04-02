@@ -7,6 +7,22 @@ import (
 	"time"
 )
 
+// Closer is a closer
+type Closer interface {
+	Close() error
+}
+
+// MessageWriter is a message writer
+type MessageWriter interface {
+	Write(msg interface{}) error
+}
+
+// MessageReader is a message reader
+type MessageReader interface {
+	Read() (interface{}, error)
+	ReadTimeout(timeout time.Duration) (interface{}, error)
+}
+
 // IDGenerator ID Generator interface
 type IDGenerator interface {
 	NewID() interface{}
@@ -109,13 +125,6 @@ func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		s.stopped = true
 		s.listener.Close()
-
-		for _, sessions := range s.sessionMaps {
-			for _, session := range sessions.sessions {
-				session.Close()
-			}
-		}
-
 		close(s.startCh)
 	})
 }
