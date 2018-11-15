@@ -13,23 +13,30 @@ import (
 	"github.com/fagongzi/gateway/pkg/pb/rpcpb"
 	"github.com/fagongzi/gateway/pkg/service"
 	"github.com/fagongzi/gateway/pkg/store"
+	"github.com/fagongzi/gateway/pkg/util"
 	"github.com/fagongzi/grpcx"
 	"github.com/fagongzi/log"
 	"google.golang.org/grpc"
 )
 
 var (
-	addr           = flag.String("addr", "127.0.0.1:9092", "Addr: client entrypoint")
+	addr           = flag.String("addr", "127.0.0.1:9092", "Addr: client grpc entrypoint")
+	addrHTTP       = flag.String("addr-http", "127.0.0.1:9093", "Addr: client http restful entrypoint")
 	addrStore      = flag.String("addr-store", "etcd://127.0.0.1:2379", "Addr: store address")
 	namespace      = flag.String("namespace", "dev", "The namespace to isolation the environment.")
 	discovery      = flag.Bool("discovery", false, "Publish apiserver service via discovery.")
 	servicePrefix  = flag.String("service-prefix", "/services", "The prefix for service name.")
 	publishLease   = flag.Int64("publish-lease", 10, "Publish service lease seconds")
 	publishTimeout = flag.Int("publish-timeout", 30, "Publish service timeout seconds")
+	version        = flag.Bool("version", false, "Show version info")
 )
 
 func main() {
 	flag.Parse()
+
+	if *version && util.PrintVersion() {
+		os.Exit(0)
+	}
 
 	log.InitLog()
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -49,19 +56,21 @@ func main() {
 			err)
 	}
 
+	service.Init(db)
+
 	var opts []grpcx.ServerOption
 	if *discovery {
 		opts = append(opts, grpcx.WithEtcdPublisher(db.Raw().(*clientv3.Client), *servicePrefix, *publishLease, time.Second*time.Duration(*publishTimeout)))
 	}
 
+	if *addrHTTP != "" {
+		opts = append(opts, grpcx.WithHTTPServer(*addrHTTP, service.InitHTTPRouter))
+	}
+
 	s := grpcx.NewGRPCServer(*addr, func(svr *grpc.Server) []grpcx.Service {
 		var services []grpcx.Service
-
-		rpcpb.RegisterMetaServiceServer(svr, service.NewMetaService(db))
-		services = append(services, grpcx.Service{
-			Name: rpcpb.ServiceMeta,
-		})
-
+		rpcpb.RegisterMetaServiceServer(svr, service.MetaService)
+		services = append(services, grpcx.NewService(rpcpb.ServiceMeta, nil))
 		return services
 	}, opts...)
 

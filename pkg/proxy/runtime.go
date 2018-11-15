@@ -6,22 +6,27 @@ import (
 	"math/rand"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/buger/jsonparser"
 	"github.com/fagongzi/gateway/pkg/lb"
 	"github.com/fagongzi/gateway/pkg/pb/metapb"
+	"github.com/fagongzi/gateway/pkg/util"
 	"github.com/fagongzi/goetty"
 	"github.com/fagongzi/log"
 	"github.com/fagongzi/util/collection"
-	"github.com/json-iterator/go"
+	"github.com/fagongzi/util/hack"
+	pbutil "github.com/fagongzi/util/protoc"
 	"github.com/valyala/fasthttp"
 	"golang.org/x/time/rate"
 )
 
 var (
-	json = jsoniter.ConfigFastest
+	dependP = regexp.MustCompile(`\$\w+\.\w+`)
 )
 
 type clusterRuntime struct {
@@ -31,13 +36,11 @@ type clusterRuntime struct {
 }
 
 func newClusterRuntime(meta *metapb.Cluster) *clusterRuntime {
-	rt := &clusterRuntime{
+	return &clusterRuntime{
 		meta: meta,
 		svrs: list.New(),
 		lb:   lb.NewLoadBalance(meta.LoadBalance),
 	}
-
-	return rt
 }
 
 func (c *clusterRuntime) updateMeta(meta *metapb.Cluster) {
@@ -77,11 +80,12 @@ func (c *clusterRuntime) selectServer(req *fasthttp.Request) uint64 {
 		return 0
 	}
 
-	id, _ := e.Value.(uint64)
-	return id
+	return e.Value.(uint64)
 }
 
 type serverRuntime struct {
+	sync.RWMutex
+
 	tw               *goetty.TimeoutWheel
 	limiter          *rate.Limiter
 	meta             *metapb.Server
@@ -100,13 +104,24 @@ func newServerRuntime(meta *metapb.Server, tw *goetty.TimeoutWheel) *serverRunti
 	}
 
 	rt.updateMeta(meta)
-
 	return rt
 }
 
+func (s *serverRuntime) clone() *serverRuntime {
+	meta := &metapb.Server{}
+	pbutil.MustUnmarshal(meta, pbutil.MustMarshal(s.meta))
+	return newServerRuntime(meta, s.tw)
+}
+
 func (s *serverRuntime) updateMeta(meta *metapb.Server) {
+	s.heathTimeout.Stop()
+	tw := s.tw
+	*s = serverRuntime{}
+	s.tw = tw
 	s.meta = meta
 	s.limiter = rate.NewLimiter(rate.Every(time.Second/time.Duration(meta.MaxQPS)), int(meta.MaxQPS))
+	s.status = metapb.Down
+	s.circuit = metapb.Open
 }
 
 func (s *serverRuntime) getCheckURL() string {
@@ -127,37 +142,48 @@ func (s *serverRuntime) changeTo(status metapb.Status) {
 	s.status = status
 }
 
-func (s *serverRuntime) isCircuitStatus(target metapb.CircuitStatus) bool {
-	return s.circuit == target
+func (s *serverRuntime) getCircuitStatus() metapb.CircuitStatus {
+	s.RLock()
+	value := s.circuit
+	s.RUnlock()
+	return value
 }
 
 func (s *serverRuntime) circuitToClose() {
+	s.Lock()
 	if s.meta.CircuitBreaker == nil ||
 		s.circuit == metapb.Close {
+		s.Unlock()
 		return
 	}
 
 	s.circuit = metapb.Close
-	log.Warnf("server <%s> change to close", s.meta.ID)
+	log.Warnf("server <%d> change to close", s.meta.ID)
 	s.tw.Schedule(time.Duration(s.meta.CircuitBreaker.CloseTimeout), s.circuitToHalf, nil)
+	s.Unlock()
 }
 
 func (s *serverRuntime) circuitToOpen() {
+	s.Lock()
 	if s.meta.CircuitBreaker == nil ||
 		s.circuit == metapb.Open ||
 		s.circuit != metapb.Half {
+		s.Unlock()
 		return
 	}
 
 	s.circuit = metapb.Open
-	log.Infof("server <%s> change to open", s.meta.ID)
+	log.Infof("server <%d> change to open", s.meta.ID)
+	s.Unlock()
 }
 
 func (s *serverRuntime) circuitToHalf(arg interface{}) {
+	s.Lock()
 	if s.meta.CircuitBreaker != nil {
-		s.circuit = metapb.Open
-		log.Warnf("server <%s> change to half", s.meta.ID)
+		s.circuit = metapb.Half
+		log.Warnf("server <%d> change to half", s.meta.ID)
 	}
+	s.Unlock()
 }
 
 type ipSegment struct {
@@ -192,17 +218,99 @@ type apiRule struct {
 }
 
 type apiNode struct {
-	meta        *metapb.DispatchNode
-	validations []*apiValidation
+	httpOption        util.HTTPOption
+	meta              *metapb.DispatchNode
+	validations       []*apiValidation
+	defaultCookies    []*fasthttp.Cookie
+	dependencies      []string
+	dependenciesPaths [][]string
+}
+
+func newAPINode(meta *metapb.DispatchNode) *apiNode {
+	rn := &apiNode{
+		meta: meta,
+	}
+
+	if meta.URLRewrite != "" {
+		matches := dependP.FindAllStringSubmatch(meta.URLRewrite, -1)
+		for _, match := range matches {
+			rn.dependencies = append(rn.dependencies, match[0])
+			rn.dependenciesPaths = append(rn.dependenciesPaths, strings.Split(match[0][1:], "."))
+		}
+	}
+
+	if nil != meta.DefaultValue {
+		for _, c := range meta.DefaultValue.Cookies {
+			ck := &fasthttp.Cookie{}
+			ck.SetKey(c.Name)
+			ck.SetValue(c.Value)
+			rn.defaultCookies = append(rn.defaultCookies, ck)
+		}
+	}
+
+	for _, v := range meta.Validations {
+		rv := &apiValidation{
+			meta: v,
+		}
+
+		for _, r := range v.Rules {
+			rv.rules = append(rv.rules, &apiRule{
+				pattern: regexp.MustCompile(r.Expression),
+			})
+		}
+
+		rn.validations = append(rn.validations, rv)
+	}
+
+	rn.httpOption = *globalHTTPOptions
+	if meta.ReadTimeout > 0 {
+		rn.httpOption.ReadTimeout = time.Second * time.Duration(meta.ReadTimeout)
+	}
+	if meta.WriteTimeout > 0 {
+		rn.httpOption.WriteTimeout = time.Second * time.Duration(meta.WriteTimeout)
+	}
+
+	return rn
+}
+
+func (n *apiNode) clone() *apiNode {
+	meta := &metapb.DispatchNode{}
+	pbutil.MustUnmarshal(meta, pbutil.MustMarshal(n.meta))
+	return newAPINode(meta)
+}
+
+func (n *apiNode) validate(req *fasthttp.Request) bool {
+	if len(n.validations) == 0 {
+		return true
+	}
+
+	for _, v := range n.validations {
+		if !v.validate(req) {
+			return false
+		}
+	}
+
+	return true
+}
+
+type renderAttr struct {
+	meta     *metapb.RenderAttr
+	extracts [][]string
+}
+
+type renderObject struct {
+	meta  *metapb.RenderObject
+	attrs []*renderAttr
 }
 
 type apiRuntime struct {
-	meta            *metapb.API
-	nodes           []*apiNode
-	urlPattern      *regexp.Regexp
-	defaultCookies  []*fasthttp.Cookie
-	parsedWhitelist []*ipSegment
-	parsedBlacklist []*ipSegment
+	meta                *metapb.API
+	nodes               []*apiNode
+	urlPattern          *regexp.Regexp
+	defaultCookies      []*fasthttp.Cookie
+	parsedWhitelist     []*ipSegment
+	parsedBlacklist     []*ipSegment
+	parsedRenderObjects []*renderObject
 }
 
 func newAPIRuntime(meta *metapb.API) *apiRuntime {
@@ -214,9 +322,20 @@ func newAPIRuntime(meta *metapb.API) *apiRuntime {
 	return ar
 }
 
+func (a *apiRuntime) clone() *apiRuntime {
+	meta := &metapb.API{}
+	pbutil.MustUnmarshal(meta, pbutil.MustMarshal(a.meta))
+	return newAPIRuntime(meta)
+}
+
 func (a *apiRuntime) updateMeta(meta *metapb.API) {
+	*a = apiRuntime{}
 	a.meta = meta
 	a.init()
+}
+
+func (a *apiRuntime) compare(i, j int) bool {
+	return a.nodes[i].meta.BatchIndex-a.nodes[j].meta.BatchIndex < 0
 }
 
 func (a *apiRuntime) init() {
@@ -224,29 +343,12 @@ func (a *apiRuntime) init() {
 		a.urlPattern = regexp.MustCompile(a.meta.URLPattern)
 	}
 
-	a.nodes = make([]*apiNode, 0)
 	for _, n := range a.meta.Nodes {
-		rn := &apiNode{
-			meta: n,
-		}
-		a.nodes = append(a.nodes, rn)
-
-		for _, v := range n.Validations {
-			rv := &apiValidation{
-				meta: v,
-			}
-
-			for _, r := range v.Rules {
-				rv.rules = append(rv.rules, &apiRule{
-					pattern: regexp.MustCompile(r.Expression),
-				})
-			}
-
-			rn.validations = append(rn.validations, rv)
-		}
+		a.nodes = append(a.nodes, newAPINode(n))
 	}
 
-	a.defaultCookies = make([]*fasthttp.Cookie, 0)
+	sort.Slice(a.nodes, a.compare)
+
 	if nil != a.meta.DefaultValue {
 		for _, c := range a.meta.DefaultValue.Cookies {
 			ck := &fasthttp.Cookie{}
@@ -272,7 +374,45 @@ func (a *apiRuntime) init() {
 		}
 	}
 
+	if nil != a.meta.RenderTemplate {
+		for _, obj := range a.meta.RenderTemplate.Objects {
+			rob := &renderObject{
+				meta: obj,
+			}
+
+			for _, attr := range obj.Attrs {
+				rattr := &renderAttr{
+					meta: attr,
+				}
+				rob.attrs = append(rob.attrs, rattr)
+
+				extracts := strings.Split(attr.ExtractExp, ",")
+				for _, extract := range extracts {
+					rattr.extracts = append(rattr.extracts, strings.Split(extract, "."))
+				}
+			}
+
+			a.parsedRenderObjects = append(a.parsedRenderObjects, rob)
+		}
+	}
+
 	return
+}
+
+func (a *apiRuntime) isWebSocket() bool {
+	return a.meta.WebSocketOptions != nil
+}
+
+func (a *apiRuntime) webSocketOptions() *metapb.WebSocketOptions {
+	return a.meta.WebSocketOptions
+}
+
+func (a *apiRuntime) hasRenderTemplate() bool {
+	return a.meta.RenderTemplate != nil
+}
+
+func (a *apiRuntime) hasDefaultValue() bool {
+	return a.meta.DefaultValue != nil
 }
 
 func (a *apiRuntime) allowWithBlacklist(ip string) bool {
@@ -303,34 +443,34 @@ func (a *apiRuntime) allowWithWhitelist(ip string) bool {
 	return false
 }
 
-func (a *apiRuntime) renderDefault(ctx *fasthttp.RequestCtx) {
-	if a.meta.DefaultValue == nil {
-		return
-	}
-
-	for _, header := range a.meta.DefaultValue.Headers {
-		ctx.Response.Header.Add(header.Name, header.Value)
-	}
-
-	for _, ck := range a.defaultCookies {
-		ctx.Response.Header.SetCookie(ck)
-	}
-
-	ctx.Write(a.meta.DefaultValue.Body)
-}
-
-func (a *apiRuntime) rewriteURL(req *fasthttp.Request, rewrite string) string {
+func (a *apiRuntime) rewriteURL(req *fasthttp.Request, node *apiNode, ctx *multiContext) string {
+	rewrite := node.meta.URLRewrite
 	if rewrite == "" || a.meta.URLPattern == "" {
 		return ""
 	}
 
-	return a.urlPattern.ReplaceAllString(string(req.URI().RequestURI()), rewrite)
+	if nil != ctx && len(node.dependencies) > 0 {
+		for idx, dep := range node.dependencies {
+			rewrite = strings.Replace(rewrite, dep, ctx.getAttr(node.dependenciesPaths[idx]...), -1)
+		}
+	}
+
+	return a.urlPattern.ReplaceAllString(hack.SliceToString(req.URI().RequestURI()), rewrite)
 }
 
 func (a *apiRuntime) matches(req *fasthttp.Request) bool {
-	return a.isUp() &&
-		(a.isDomainMatches(req) ||
-			(a.isMethodMatches(req) && a.isURIMatches(req)))
+	if !a.isUp() {
+		return false
+	}
+
+	switch a.matchRule() {
+	case metapb.MatchAll:
+		return a.isDomainMatches(req) && a.isMethodMatches(req) && a.isURIMatches(req)
+	case metapb.MatchAny:
+		return a.isDomainMatches(req) || a.isMethodMatches(req) || a.isURIMatches(req)
+	default:
+		return a.isDomainMatches(req) || (a.isMethodMatches(req) && a.isURIMatches(req))
+	}
 }
 
 func (a *apiRuntime) isUp() bool {
@@ -338,29 +478,27 @@ func (a *apiRuntime) isUp() bool {
 }
 
 func (a *apiRuntime) isMethodMatches(req *fasthttp.Request) bool {
-	return a.meta.Method == "*" || strings.ToUpper(string(req.Header.Method())) == a.meta.Method
+	return a.meta.Method == "*" || strings.ToUpper(hack.SliceToString(req.Header.Method())) == a.meta.Method
 }
 
 func (a *apiRuntime) isURIMatches(req *fasthttp.Request) bool {
+	if a.urlPattern == nil {
+		return false
+	}
+
 	return a.urlPattern.Match(req.URI().RequestURI())
 }
 
 func (a *apiRuntime) isDomainMatches(req *fasthttp.Request) bool {
-	return a.meta.Domain != "" && string(req.Header.Host()) == a.meta.Domain
+	return a.meta.Domain != "" && hack.SliceToString(req.Header.Host()) == a.meta.Domain
 }
 
-func (a *apiNode) validate(req *fasthttp.Request) bool {
-	if len(a.validations) == 0 {
-		return true
-	}
+func (a *apiRuntime) position() uint32 {
+	return a.meta.GetPosition()
+}
 
-	for _, v := range a.validations {
-		if !v.validate(req) {
-			return false
-		}
-	}
-
-	return true
+func (a *apiRuntime) matchRule() metapb.MatchRule {
+	return a.meta.GetMatchRule()
 }
 
 func (v *apiValidation) validate(req *fasthttp.Request) bool {
@@ -376,7 +514,7 @@ func (v *apiValidation) validate(req *fasthttp.Request) bool {
 	}
 
 	for _, r := range v.rules {
-		if !r.validate([]byte(value)) {
+		if !r.validate(hack.StringToSlice(value)) {
 			return false
 		}
 	}
@@ -394,22 +532,14 @@ type routingRuntime struct {
 }
 
 func newRoutingRuntime(meta *metapb.Routing) *routingRuntime {
-	r := &routingRuntime{
+	return &routingRuntime{
 		meta: meta,
 		rand: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	r.init()
-
-	return r
 }
 
 func (a *routingRuntime) updateMeta(meta *metapb.Routing) {
 	a.meta = meta
-	a.init()
-}
-
-func (a *routingRuntime) init() {
-	return
 }
 
 func (a *routingRuntime) matches(apiID uint64, req *fasthttp.Request) bool {
@@ -529,27 +659,43 @@ func paramValue(param *metapb.Parameter, req *fasthttp.Request) string {
 	case metapb.FormData:
 		return getFormValue(param.Name, req)
 	case metapb.JSONBody:
-		return json.Get(req.Body(), param.Name).ToString()
+		value, _, _, err := jsonparser.Get(req.Body(), param.Name)
+		if err != nil {
+			return ""
+		}
+		return hack.SliceToString(value)
 	case metapb.Header:
 		return getHeaderValue(param.Name, req)
 	case metapb.Cookie:
 		return getCookieValue(param.Name, req)
+	case metapb.PathValue:
+		return getPathValue(int(param.Index), req)
 	default:
 		return ""
 	}
 }
 
 func getCookieValue(name string, req *fasthttp.Request) string {
-	return string(req.Header.Cookie(name))
+	return hack.SliceToString(req.Header.Cookie(name))
 }
 
 func getHeaderValue(name string, req *fasthttp.Request) string {
-	return string(req.Header.Peek(name))
+	return hack.SliceToString(req.Header.Peek(name))
 }
 
 func getQueryValue(name string, req *fasthttp.Request) string {
-	v, _ := url.QueryUnescape(string(req.URI().QueryArgs().Peek(name)))
+	v, _ := url.QueryUnescape(hack.SliceToString(req.URI().QueryArgs().Peek(name)))
 	return v
+}
+
+func getPathValue(idx int, req *fasthttp.Request) string {
+	path := hack.SliceToString(req.URI().Path()[1:])
+	values := strings.Split(path, "/")
+	if len(values) <= idx {
+		return ""
+	}
+
+	return values[idx]
 }
 
 func getFormValue(name string, req *fasthttp.Request) string {

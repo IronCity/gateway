@@ -7,14 +7,12 @@ import (
 // Hop-by-hop headers. These are removed when sent to the backend.
 // http://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html
 var hopHeaders = []string{
-	"Connection",
 	"Keep-Alive",
 	"Proxy-Authenticate",
 	"Proxy-Authorization",
-	"Te", // canonicalized version of "TE"
+	"Te",
 	"Trailers",
 	"Transfer-Encoding",
-	"Upgrade",
 }
 
 // HeadersFilter HeadersFilter
@@ -42,6 +40,7 @@ func (f *HeadersFilter) Pre(c filter.Context) (statusCode int, err error) {
 		c.ForwardRequest().Header.Del(h)
 	}
 
+	c.ForwardRequest().Header.SetHost(c.Server().Addr)
 	return f.BaseFilter.Pre(c)
 }
 

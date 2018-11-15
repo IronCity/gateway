@@ -1,6 +1,8 @@
 package client
 
 import (
+	"time"
+
 	"github.com/fagongzi/gateway/pkg/pb"
 	"github.com/fagongzi/gateway/pkg/pb/metapb"
 )
@@ -60,6 +62,12 @@ func (ab *APIBuilder) RemovePerm(perm string) *APIBuilder {
 	return ab
 }
 
+// WebSocketOptions set websocket options
+func (ab *APIBuilder) WebSocketOptions(options *metapb.WebSocketOptions) *APIBuilder {
+	ab.value.WebSocketOptions = options
+	return ab
+}
+
 // MatchURLPattern set a match path
 func (ab *APIBuilder) MatchURLPattern(urlPattern string) *APIBuilder {
 	ab.value.URLPattern = urlPattern
@@ -107,6 +115,12 @@ func (ab *APIBuilder) DefaultValue(value []byte) *APIBuilder {
 	}
 
 	ab.value.DefaultValue.Body = value
+	return ab
+}
+
+// UseDefaultValue use default value if force
+func (ab *APIBuilder) UseDefaultValue(force bool) *APIBuilder {
+	ab.value.UseDefault = force
 	return ab
 }
 
@@ -214,8 +228,8 @@ func (ab *APIBuilder) AddBlacklist(ips ...string) *APIBuilder {
 	return ab
 }
 
-// AddDispatchNodeForce add a dispatch node even if the cluster added
-func (ab *APIBuilder) AddDispatchNodeForce(cluster uint64) *APIBuilder {
+// AppendDispatchNode append a dispatch node even if the cluster added
+func (ab *APIBuilder) AppendDispatchNode(cluster uint64) *APIBuilder {
 	ab.value.Nodes = append(ab.value.Nodes, &metapb.DispatchNode{
 		ClusterID: cluster,
 	})
@@ -238,6 +252,198 @@ func (ab *APIBuilder) AddDispatchNode(cluster uint64) *APIBuilder {
 	return ab
 }
 
+// DispatchNodeTimeouts add timeouts options
+func (ab *APIBuilder) DispatchNodeTimeouts(cluster uint64, readTimeout, writeTimeout int64) *APIBuilder {
+	return ab.DispatchNodeTimeoutsWithIndex(cluster, 0, readTimeout, writeTimeout)
+}
+
+// DispatchNodeTimeoutsWithIndex add timeouts options
+func (ab *APIBuilder) DispatchNodeTimeoutsWithIndex(cluster uint64, idx int, readTimeout, writeTimeout int64) *APIBuilder {
+	node := ab.getNode(cluster, idx)
+	if nil == node {
+		ab.value.Nodes = append(ab.value.Nodes, &metapb.DispatchNode{
+			ClusterID:    cluster,
+			ReadTimeout:  readTimeout,
+			WriteTimeout: writeTimeout,
+		})
+	} else {
+		node.ReadTimeout = readTimeout
+		node.WriteTimeout = writeTimeout
+	}
+
+	return ab
+}
+
+// DispatchNodeRetryStrategy add a retryStrategy
+func (ab *APIBuilder) DispatchNodeRetryStrategy(cluster uint64, strategy *metapb.RetryStrategy) *APIBuilder {
+	return ab.DispatchNodeRetryStrategyWithIndex(cluster, 0, strategy)
+}
+
+// DispatchNodeRetryStrategyWithIndex add a retryStrategy
+func (ab *APIBuilder) DispatchNodeRetryStrategyWithIndex(cluster uint64, idx int, strategy *metapb.RetryStrategy) *APIBuilder {
+	node := ab.getNode(cluster, idx)
+	if nil == node {
+		ab.value.Nodes = append(ab.value.Nodes, &metapb.DispatchNode{
+			ClusterID:     cluster,
+			RetryStrategy: strategy,
+		})
+	} else {
+		node.RetryStrategy = strategy
+	}
+
+	return ab
+}
+
+// DispatchNodeBatchIndex add a dispatch node batch index
+func (ab *APIBuilder) DispatchNodeBatchIndex(cluster uint64, batchIndex int) *APIBuilder {
+	return ab.DispatchNodeBatchIndexWithIndex(cluster, 0, batchIndex)
+}
+
+// DispatchNodeBatchIndexWithIndex add a dispatch node batch index
+func (ab *APIBuilder) DispatchNodeBatchIndexWithIndex(cluster uint64, idx int, batchIndex int) *APIBuilder {
+	node := ab.getNode(cluster, idx)
+	if nil == node {
+		ab.value.Nodes = append(ab.value.Nodes, &metapb.DispatchNode{
+			ClusterID:  cluster,
+			BatchIndex: int32(batchIndex),
+		})
+	} else {
+		node.BatchIndex = int32(batchIndex)
+	}
+
+	return ab
+}
+
+// AddDispatchNodeDefaultValue add default value for dispatch
+func (ab *APIBuilder) AddDispatchNodeDefaultValue(cluster uint64, value []byte) *APIBuilder {
+	return ab.AddDispatchNodeDefaultValueWithIndex(cluster, 0, value)
+}
+
+// AddDispatchNodeDefaultValueWithIndex add default value for dispatch
+func (ab *APIBuilder) AddDispatchNodeDefaultValueWithIndex(cluster uint64, idx int, value []byte) *APIBuilder {
+	node := ab.getNode(cluster, idx)
+	if nil == node {
+		ab.value.Nodes = append(ab.value.Nodes, &metapb.DispatchNode{
+			ClusterID: cluster,
+			DefaultValue: &metapb.HTTPResult{
+				Body: value,
+			},
+		})
+	} else {
+		if node.DefaultValue == nil {
+			node.DefaultValue = &metapb.HTTPResult{
+				Body: value,
+			}
+		} else {
+			node.DefaultValue.Body = value
+		}
+	}
+
+	return ab
+}
+
+// UseDispatchNodeDefaultValue use default value if force
+func (ab *APIBuilder) UseDispatchNodeDefaultValue(cluster uint64, force bool) *APIBuilder {
+	return ab.UseDispatchNodeDefaultValueWithIndex(cluster, 0, force)
+}
+
+// UseDispatchNodeDefaultValueWithIndex use default value if force
+func (ab *APIBuilder) UseDispatchNodeDefaultValueWithIndex(cluster uint64, idx int, force bool) *APIBuilder {
+	node := ab.getNode(cluster, idx)
+	if nil == node {
+		ab.value.Nodes = append(ab.value.Nodes, &metapb.DispatchNode{
+			ClusterID:  cluster,
+			UseDefault: force,
+		})
+	} else {
+		node.UseDefault = force
+	}
+
+	return ab
+}
+
+// AddDispatchNodeDefaultValueHeader add default value header
+func (ab *APIBuilder) AddDispatchNodeDefaultValueHeader(cluster uint64, name, value string) *APIBuilder {
+	return ab.AddDispatchNodeDefaultValueHeaderWithIndex(cluster, 0, name, value)
+}
+
+// AddDispatchNodeDefaultValueHeaderWithIndex add default value header
+func (ab *APIBuilder) AddDispatchNodeDefaultValueHeaderWithIndex(cluster uint64, idx int, name, value string) *APIBuilder {
+	node := ab.getNode(cluster, idx)
+	if nil == node {
+		ab.value.Nodes = append(ab.value.Nodes, &metapb.DispatchNode{
+			ClusterID: cluster,
+			DefaultValue: &metapb.HTTPResult{
+				Headers: []*metapb.PairValue{
+					&metapb.PairValue{
+						Name:  name,
+						Value: value,
+					},
+				},
+			},
+		})
+	} else {
+		if node.DefaultValue == nil {
+			node.DefaultValue = &metapb.HTTPResult{
+				Headers: []*metapb.PairValue{
+					&metapb.PairValue{
+						Name:  name,
+						Value: value,
+					},
+				},
+			}
+		} else {
+			node.DefaultValue.Headers = append(node.DefaultValue.Headers, &metapb.PairValue{
+				Name:  name,
+				Value: value,
+			})
+		}
+	}
+
+	return ab
+}
+
+// AddDispatchNodeDefaultValueCookie add default value cookie
+func (ab *APIBuilder) AddDispatchNodeDefaultValueCookie(cluster uint64, name, value string) *APIBuilder {
+	return ab.AddDispatchNodeDefaultValueCookieWithIndex(cluster, 0, name, value)
+}
+
+// AddDispatchNodeDefaultValueCookieWithIndex add default value cookie
+func (ab *APIBuilder) AddDispatchNodeDefaultValueCookieWithIndex(cluster uint64, idx int, name, value string) *APIBuilder {
+	node := ab.getNode(cluster, idx)
+	if nil == node {
+		ab.value.Nodes = append(ab.value.Nodes, &metapb.DispatchNode{
+			ClusterID: cluster,
+			DefaultValue: &metapb.HTTPResult{
+				Cookies: []*metapb.PairValue{
+					&metapb.PairValue{
+						Name:  name,
+						Value: value,
+					},
+				},
+			},
+		})
+	} else {
+		if node.DefaultValue == nil {
+			node.DefaultValue = &metapb.HTTPResult{
+				Cookies: []*metapb.PairValue{
+					&metapb.PairValue{
+						Name:  name,
+						Value: value,
+					},
+				},
+			}
+		} else {
+			node.DefaultValue.Cookies = append(node.DefaultValue.Cookies, &metapb.PairValue{
+				Name:  name,
+				Value: value,
+			})
+		}
+	}
+
+	return ab
+}
+
 // RemoveDispatchNodeURLRewrite remove dispatch node
 func (ab *APIBuilder) RemoveDispatchNodeURLRewrite(cluster uint64) *APIBuilder {
 	for _, n := range ab.value.Nodes {
@@ -246,6 +452,65 @@ func (ab *APIBuilder) RemoveDispatchNodeURLRewrite(cluster uint64) *APIBuilder {
 		}
 	}
 	return ab
+}
+
+// DispatchNodeUseCachingWithIndex set dispatch node caching
+func (ab *APIBuilder) DispatchNodeUseCachingWithIndex(cluster uint64, index int, deadline time.Duration) *APIBuilder {
+	node := ab.getNode(cluster, index)
+
+	if node == nil {
+		ab.value.Nodes = append(ab.value.Nodes, &metapb.DispatchNode{
+			ClusterID: cluster,
+			Cache: &metapb.Cache{
+				Deadline: uint64(deadline.Seconds()),
+			},
+		})
+	} else {
+		node.Cache = &metapb.Cache{
+			Deadline: uint64(deadline.Seconds()),
+		}
+	}
+
+	return ab
+}
+
+// DispatchNodeUseCaching set dispatch node caching
+func (ab *APIBuilder) DispatchNodeUseCaching(cluster uint64, deadline time.Duration) *APIBuilder {
+	return ab.DispatchNodeUseCachingWithIndex(cluster, 0, deadline)
+}
+
+// AddDispatchNodeCachingKeyWithIndex add key for caching
+func (ab *APIBuilder) AddDispatchNodeCachingKeyWithIndex(cluster uint64, index int, keys ...metapb.Parameter) *APIBuilder {
+	node := ab.getNode(cluster, index)
+	if node != nil {
+		node.Cache.Keys = append(node.Cache.Keys, keys...)
+	}
+
+	return ab
+}
+
+// AddDispatchNodeCachingKey add key for caching
+func (ab *APIBuilder) AddDispatchNodeCachingKey(cluster uint64, keys ...metapb.Parameter) *APIBuilder {
+	return ab.AddDispatchNodeCachingKeyWithIndex(cluster, 0, keys...)
+}
+
+// AddDispatchNodeCachingConditionWithIndex add condition for caching
+func (ab *APIBuilder) AddDispatchNodeCachingConditionWithIndex(cluster uint64, index int, param metapb.Parameter, op metapb.CMP, expect string) *APIBuilder {
+	node := ab.getNode(cluster, index)
+	if node != nil {
+		node.Cache.Conditions = append(node.Cache.Conditions, metapb.Condition{
+			Parameter: param,
+			Cmp:       op,
+			Expect:    expect,
+		})
+	}
+
+	return ab
+}
+
+// AddDispatchNodeCachingCondition add condition for caching
+func (ab *APIBuilder) AddDispatchNodeCachingCondition(cluster uint64, param metapb.Parameter, op metapb.CMP, expect string) *APIBuilder {
+	return ab.AddDispatchNodeCachingConditionWithIndex(cluster, 0, param, op, expect)
 }
 
 // DispatchNodeURLRewriteWithIndex set dispatch node url rewrite
@@ -381,6 +646,33 @@ func (ab *APIBuilder) addRenderObject(nameInTemplate string, flatAttrs bool, nam
 	return ab
 }
 
+// AddTag add tag for api
+func (ab *APIBuilder) AddTag(key, value string) *APIBuilder {
+	ab.value.Tags = append(ab.value.Tags, &metapb.PairValue{
+		Name:  key,
+		Value: value,
+	})
+	return ab
+}
+
+// RemoveTag remove tag for api
+func (ab *APIBuilder) RemoveTag(key string) *APIBuilder {
+	var newTags []*metapb.PairValue
+	for _, tag := range ab.value.Tags {
+		if tag.Name != key {
+			newTags = append(newTags, tag)
+		}
+	}
+	ab.value.Tags = newTags
+	return ab
+}
+
+// Position reset the position for api
+func (ab *APIBuilder) Position(value uint32) *APIBuilder {
+	ab.value.Position = value
+	return ab
+}
+
 // Commit commit
 func (ab *APIBuilder) Commit() (uint64, error) {
 	err := pb.ValidateAPI(&ab.value)
@@ -402,7 +694,7 @@ func (ab *APIBuilder) getNode(cluster uint64, index int) *metapb.DispatchNode {
 		}
 
 		if n.ClusterID == cluster {
-			idx += 1
+			idx++
 		}
 	}
 

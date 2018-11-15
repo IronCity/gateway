@@ -38,12 +38,18 @@ func (r *dispatcher) addToCheck(svr *serverRuntime) {
 }
 
 func (r *dispatcher) heathCheckTimeout(arg interface{}) {
-	r.checkerC <- arg.(uint64)
+	id := arg.(uint64)
+	r.RLock()
+	_, ok := r.servers[id]
+	r.RUnlock()
+	if ok {
+		r.checkerC <- id
+	}
 }
 
 func (r *dispatcher) check(id uint64) {
-	r.Lock()
-	defer r.Unlock()
+	r.RLock()
+	defer r.RUnlock()
 
 	svr, ok := r.servers[id]
 	if !ok {

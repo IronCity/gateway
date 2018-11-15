@@ -32,9 +32,13 @@ const (
 	FilterCircuitBreake = "CIRCUIT-BREAKER"
 	// FilterValidation validation request filter
 	FilterValidation = "VALIDATION"
+	// FilterCaching caching filter
+	FilterCaching = "CACHING"
+	// FilterJWT jwt filter
+	FilterJWT = "JWT"
 )
 
-func newFilter(filterSpec *FilterSpec) (filter.Filter, error) {
+func (p *Proxy) newFilter(filterSpec *FilterSpec) (filter.Filter, error) {
 	if filterSpec.External {
 		return newExternalFilter(filterSpec)
 	}
@@ -60,6 +64,10 @@ func newFilter(filterSpec *FilterSpec) (filter.Filter, error) {
 		return newCircuitBreakeFilter(), nil
 	case FilterValidation:
 		return newValidationFilter(), nil
+	case FilterCaching:
+		return newCachingFilter(p.cfg.Option.LimitBytesCaching, p.dispatcher.tw), nil
+	case FilterJWT:
+		return newJWTFilter(p.cfg.Option.JWTCfgFile)
 	default:
 		return nil, ErrUnknownFilter
 	}

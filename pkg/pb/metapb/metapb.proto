@@ -42,6 +42,7 @@ enum Source {
     JSONBody    = 2;
     Header      = 3;
     Cookie      = 4;
+    PathValue   = 5;
 }
 
 enum RuleType {
@@ -63,13 +64,19 @@ enum RoutingStrategy {
     Split = 1;
 }
 
+enum MatchRule {
+    MatchDefault = 0;
+    MatchAll     = 1;
+    MatchAny     = 2;
+}
+
 // Proxy is a meta data of the gateway proxy
 message Proxy {
     optional string addr     = 1 [(gogoproto.nullable) = false];
 	optional string addrRPC  = 2 [(gogoproto.nullable) = false];
 }
 
-// Cluster is a set of server has same interface 
+// Cluster is a set of server has same interface
 message Cluster {
     optional uint64       id          = 1 [(gogoproto.nullable) = false, (gogoproto.customname) = "ID"];
     optional string       name        = 2 [(gogoproto.nullable) = false];
@@ -124,14 +131,16 @@ message IPAccessControl {
 // HTTPResult is a http result
 message HTTPResult {
     optional bytes     body    = 1;
-    repeated PairValue headers = 2; 
+    repeated PairValue headers = 2;
     repeated PairValue cookies = 3;
+    optional int32     code    = 4  [(gogoproto.nullable) = false];
 }
 
 // Parameter is a parameter from a http request
 message Parameter {
     optional string name   = 1 [(gogoproto.nullable) = false];
     optional Source source = 2 [(gogoproto.nullable) = false];
+    optional int32  index  = 3 [(gogoproto.nullable) = false];
 }
 
 // ValidationRule is a validation rule
@@ -147,15 +156,36 @@ message Validation {
     repeated ValidationRule rules     = 3 [(gogoproto.nullable) = false];
 }
 
-// DispatchNode is the request forward to
-message DispatchNode {
-    optional uint64     clusterID    = 1 [(gogoproto.nullable) = false];
-    optional string     urlRewrite   = 2 [(gogoproto.nullable) = false, (gogoproto.customname) = "URLRewrite"];
-    optional string     attrName     = 3 [(gogoproto.nullable) = false];
-    repeated Validation validations  = 4;
+// RetryStrategy retry strategy
+message RetryStrategy {
+    optional int32 interval = 1 [(gogoproto.nullable) = false];
+    optional int32 maxTimes = 2 [(gogoproto.nullable) = false];
+    repeated int32 codes    = 3;
 }
 
-// RenderTemplate the template that render to client 
+// DispatchNode is the request forward to
+message DispatchNode {
+    optional uint64        clusterID     = 1 [(gogoproto.nullable) = false];
+    optional string        urlRewrite    = 2 [(gogoproto.nullable) = false, (gogoproto.customname) = "URLRewrite"];
+    optional string        attrName      = 3 [(gogoproto.nullable) = false];
+    repeated Validation    validations   = 4;
+    optional Cache         cache         = 5;
+    optional HTTPResult    defaultValue  = 6 [(gogoproto.nullable) = true];
+    optional bool          useDefault    = 7 [(gogoproto.nullable) = false];
+    optional int32         batchIndex    = 8 [(gogoproto.nullable) = false];
+    optional RetryStrategy retryStrategy = 9;
+    optional int64         writeTimeout  = 10[(gogoproto.nullable) = false];
+    optional int64         readTimeout   = 11[(gogoproto.nullable) = false];
+}
+
+// Cache is used for cache api result
+message Cache {
+    repeated Parameter keys       = 1 [(gogoproto.nullable) = false];
+    optional uint64    deadline   = 2 [(gogoproto.nullable) = false];
+    repeated Condition conditions = 3 [(gogoproto.nullable) = false];
+}
+
+// RenderTemplate the template that render to client
 message RenderTemplate {
     repeated RenderObject objects = 1;
 }
@@ -175,18 +205,23 @@ message RenderAttr {
 
 // API is the api for dispatcher
 message API {
-    optional uint64          id              = 1 [(gogoproto.nullable) = false, (gogoproto.customname) = "ID"];
-    optional string          name            = 2 [(gogoproto.nullable) = false];
-    optional string          urlPattern      = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "URLPattern"];
-    optional string          method          = 4 [(gogoproto.nullable) = false];
-    optional string          domain          = 5 [(gogoproto.nullable) = false];
-    optional Status          status          = 6 [(gogoproto.nullable) = false];
-    optional IPAccessControl ipAccessControl = 7 [(gogoproto.nullable) = true, (gogoproto.customname) = "IPAccessControl"];
-    optional HTTPResult      defaultValue    = 8 [(gogoproto.nullable) = true];
-    repeated DispatchNode    nodes           = 9;
-    repeated string          perms           = 10;
-    optional string          authFilter      = 11 [(gogoproto.nullable) = false];
-    optional RenderTemplate  renderTemplate  = 12;
+    optional uint64           id               = 1 [(gogoproto.nullable) = false, (gogoproto.customname) = "ID"];
+    optional string           name             = 2 [(gogoproto.nullable) = false];
+    optional string           urlPattern       = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "URLPattern"];
+    optional string           method           = 4 [(gogoproto.nullable) = false];
+    optional string           domain           = 5 [(gogoproto.nullable) = false];
+    optional Status           status           = 6 [(gogoproto.nullable) = false];
+    optional IPAccessControl  ipAccessControl  = 7 [(gogoproto.nullable) = true, (gogoproto.customname) = "IPAccessControl"];
+    optional HTTPResult       defaultValue     = 8 [(gogoproto.nullable) = true];
+    repeated DispatchNode     nodes            = 9;
+    repeated string           perms            = 10;
+    optional string           authFilter       = 11 [(gogoproto.nullable) = false];
+    optional RenderTemplate   renderTemplate   = 12;
+    optional bool             useDefault       = 13 [(gogoproto.nullable) = false];
+    optional MatchRule        matchRule        = 14 [(gogoproto.nullable) = false];
+    optional uint32           position         = 15 [(gogoproto.nullable) = false];
+    repeated PairValue        tags             = 16;
+    optional WebSocketOptions webSocketOptions = 17;
 }
 
 // Condition is a condition for routing
@@ -196,7 +231,7 @@ message Condition {
     optional string    expect    = 3 [(gogoproto.nullable) = false];
 }
 
-// Routing is a routing 
+// Routing is a routing
 message Routing {
     optional uint64          id          = 1 [(gogoproto.nullable) = false, (gogoproto.customname) = "ID"];
     optional uint64          clusterID   = 2 [(gogoproto.nullable) = false];
@@ -206,4 +241,9 @@ message Routing {
     optional Status          status      = 6 [(gogoproto.nullable) = false];
     optional uint64          api         = 7 [(gogoproto.nullable) = false, (gogoproto.customname) = "API"];
     optional string          name        = 8 [(gogoproto.nullable) = false];
+}
+
+// WebSocketOptions websocket options
+message WebSocketOptions {
+    optional string origin = 1 [(gogoproto.nullable) = false];
 }

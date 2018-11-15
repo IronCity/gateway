@@ -55,15 +55,20 @@ type proxyContext struct {
 	attrs map[string]interface{}
 }
 
-func newContext(rt *dispatcher, originCtx *fasthttp.RequestCtx, forwardReq *fasthttp.Request, result *dispathNode) filter.Context {
-	return &proxyContext{
-		result:     result,
-		originCtx:  originCtx,
-		forwardReq: forwardReq,
-		rt:         rt,
-		startAt:    time.Now(),
-		attrs:      make(map[string]interface{}),
+func (c *proxyContext) init(rt *dispatcher, originCtx *fasthttp.RequestCtx, forwardReq *fasthttp.Request, result *dispathNode) {
+	c.result = result
+	c.originCtx = originCtx
+	c.forwardReq = forwardReq
+	c.rt = rt
+	c.startAt = time.Now()
+	c.attrs = make(map[string]interface{})
+}
+
+func (c *proxyContext) reset() {
+	if c.forwardReq != nil {
+		fasthttp.ReleaseRequest(c.forwardReq)
 	}
+	*c = emptyContext
 }
 
 func (c *proxyContext) SetAttr(key string, value interface{}) {
@@ -127,7 +132,7 @@ func (c *proxyContext) allowWithWhitelist(ip string) bool {
 }
 
 func (c *proxyContext) circuitStatus() metapb.CircuitStatus {
-	return c.result.dest.circuit
+	return c.result.dest.getCircuitStatus()
 }
 
 func (c *proxyContext) changeCircuitStatusToClose() {
